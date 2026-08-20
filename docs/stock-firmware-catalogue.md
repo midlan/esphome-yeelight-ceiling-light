@@ -7,10 +7,13 @@ Xiaomi's cloud will describe. Collected with `tools/cloud_fw_info.py`; see
 Change descriptions are reproduced **verbatim** as Xiaomi publishes them, in
 whatever language they were written. Some are Chinese, some English, many empty.
 
-No firmware images are included here - only their sizes and checksums, so a copy
-you fetch yourself can be verified. `tools/cloud_fw_info.py --model <model>
---download <dir>` fetches one, and checks the md5 against the value the endpoint
-reported before writing the file.
+On this branch the images themselves are in `firmware/stock/`, with the md5 here
+for verifying them. They are deliberately **not** on the branch proposed
+upstream, which carries sizes and checksums only - see `firmware/stock/README.md`.
+
+`tools/cloud_fw_info.py --model <model> --download <dir>` fetches any of them
+directly and checks the md5 against the value the endpoint reported before
+writing the file.
 
 Chip is read from the image header, not guessed: ESP32 images carry a `chip_id`,
 ESP8266 images share the `0xE9` magic but have no extended header and are told
