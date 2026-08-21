@@ -20,7 +20,8 @@ mechanism working on `yeelink.light.ceiling22`; that was not verified here.
 > `docs/xiaomi-cloud-firmware.md` - so a way back exists without a UART backup,
 > though only to the *current* build, since older versions are not downloadable.
 > Separately, the updater writes to the inactive OTA slot, so the stock app
-> normally survives a conversion in the other one.
+> survives in the other one - but only until the *next* flash, which targets it.
+> See "What the flash looks like underneath" below.
 
 ---
 
@@ -374,15 +375,60 @@ from a `ceiling10`; other models are likely similar but were not dumped.
 | coredump | data | coredump | 0x3E8000 | 64K |
 | minvs | data | 0xfe | 0x3F8000 | 16K |
 
-Three things follow from it.
+Four things follow from it.
 
 **The app slots are 1920 KB**, so image size is a non-issue: stock itself is about
 1.3 MB and a typical ESPHome build for one of these is well under a megabyte.
 
 **There is no `factory` partition**, so `otadata` alone decides what boots.
 
-**Stock survives the conversion.** The updater writes to the *inactive* slot, so
-after flashing, the original vendor app is still sitting in the other one.
+**Stock survives the first flash, and only the first.** Both the vendor updater
+and ESPHome's own OTA write to whatever `esp_ota_get_next_update_partition()`
+returns, which with two slots and no `factory` partition strictly alternates. So
+the conversion lands in the free slot and leaves the vendor app intact; the *next*
+flash targets the slot holding it. If you want that copy, read it out before the
+second flash - see `docs/flashing-over-uart.md`.
+
+**Configuration is not in the app slots at all**, which is what makes going back
+and forth survivable. Details below.
+
+### Configuration lives outside the app slots
+
+There is exactly one `nvs` partition, at `0x9000`, and both firmwares share it.
+No app slot holds any configuration, which is why changing which slot boots does
+not lose your Wi-Fi credentials or the vendor pairing - the stock firmware comes
+back already knowing them.
+
+That is by design rather than luck. `esp_ota_begin()` erases the whole destination
+app partition before writing, so anything kept inside an app partition would die
+on every update. ESP-IDF therefore separates code from settings, and NVS isolates
+writers by **namespace** rather than by partition: ESPHome opens
+`nvs_open("esphome", ...)` and the stock firmware uses its own names. Keys cannot
+collide, but the 16 KB and its free space are shared, so the two are isolated
+logically, not physically.
+
+The captive-portal behaviour described earlier is the same mechanism one level
+down - those credentials are NVS entries keyed on
+`App.get_config_version_hash()`, which is why a configuration change orphans them.
+
+Two paths erase the *whole* `nvs` partition, vendor keys included:
+
+- the `factory_reset` component - button, switch or action - calls
+  `global_preferences->reset()`, which calls `nvs_flash_erase()`;
+- failing to open the `esphome` namespace at startup, after which ESPHome erases
+  NVS and retries. A full NVS would trigger this silently.
+
+So keep `factory_reset` out of any configuration for a device whose vendor pairing
+you want to survive a return to stock. `nvs_flash_erase()` acts only on the
+partition named `nvs`, so `factory_nvs` and `minvs` are not affected by it.
+
+What the other data partitions hold has **not been established** - none of them
+have been read. Going by labels, subtypes and sizes alone: `factory_nvs` is a
+second NVS whose name suggests factory-provisioned identity, `minvs` uses a custom
+subtype (`0xfe`) and so is presumably miio-specific, `mfi_p` is a 4 KB SPIFFS
+whose name points at Apple MFi and therefore plausibly HomeKit pairing, and
+`phy_init` holds RF calibration. Which partition stores the device token is
+unknown for the same reason.
 
 ### Getting stock back without reflashing it
 
