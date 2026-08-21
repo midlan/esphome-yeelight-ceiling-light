@@ -52,18 +52,23 @@ which is also the moment the boot log you wanted was printed.
 Three fixes, cheapest first:
 
 - **a separate 3.3V supply** for the board, adapter's VCC output switched off,
-  grounds common. A partially discharged 18650 works well: low internal
-  resistance, so the inrush is a non-issue.
+  grounds common. A **partially discharged** 18650 works well: low internal
+  resistance, so the inrush is a non-issue. Note **partially** - see the warning
+  below.
 - **bulk capacitance** across the board's 3.3V and GND, 100-470uF. Adapter
   regulators often have only ~22uF on the output, which is not enough to hold the
   rail through startup.
 - **a different USB port** - rear-panel rather than front-panel, or a powered hub.
   Sometimes the extra headroom is all it takes.
 
-> **If you use a lithium cell, measure it first.** The ESP32's absolute maximum on
-> `VDD33` is **3.6V**. A charged 18650 sits at **4.2V** and will destroy the chip.
-> A partially discharged cell around 3.4-3.5V is inside spec; the same cell after
-> a charge is not.
+> **If you use a lithium cell, measure it first - every time.** The ESP32's
+> absolute maximum on `VDD33` is **3.6V**. A **fully charged 18650 sits at 4.2V and
+> will destroy the chip**. A **partially discharged cell around 3.4-3.5V is inside
+> spec** - but the same cell after a charge is not, so a cell that was safe
+> yesterday is not necessarily safe today.
+>
+> A bare 18650 will also push tens of amps into a short, so keep the leads short,
+> insulate the unused end, and connect the negative last.
 
 ---
 
@@ -81,10 +86,17 @@ adapter RX. `esptool` needs the opposite direction, which a readable boot log sa
 nothing about. If the log works but nothing syncs, suspect the direction you have
 not exercised.
 
-**A continuity beeper will not sound through a series resistor.** These boards
-commonly put 100R between the debug pad and the module pin. A beeper trips below
-~50R, so it stays silent while the signal passes perfectly. **Measure resistance,
-not continuity**, and expect a finite value rather than a short.
+**A continuity beeper will not sound through a series resistor - and there is
+usually one on TX and RX.** These boards commonly put **100R in series on each
+UART line**, between the `TX`/`RX` debug pads and the module's `TXD0`/`RXD0` pins.
+A beeper trips below ~50R, so it stays silent while the signal passes perfectly.
+
+So "no beep from the pad to the module pin" does **not** mean the trace is broken.
+**Measure resistance, not continuity**, and expect roughly 100R rather than a
+short. On an ESP32-WROOM module the pins to check against are **34 (`RXD0`)** and
+**35 (`TXD0`)** - and a handy trick is to find `TXD0` first using the pad you know
+works, since the boot log proves that path, then check the other pad against its
+neighbour.
 
 **Close the terminal before running esptool.** Windows gives serial ports
 exclusively to one process. PuTTY holding the port produces
