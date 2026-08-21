@@ -61,7 +61,7 @@ Two things about that payload matter:
 
 The cloud only relays the instruction. The firmware file never leaves your LAN.
 
-## Three requirements that are easy to miss
+## Four requirements that are easy to miss
 
 ### 1. The image carries a 4-byte CRC trailer
 
@@ -141,6 +141,106 @@ device**; that is the only evidence the transfer started, and
 and stops as soon as the device leaves `idle`, which is useful when a firmware
 generation wants a different payload - though note that no payload shape helps if
 the URL carries a port.
+
+### 4. The app must tolerate a partition table with no MD5
+
+This one does not stop the transfer. The image downloads, the updater reports
+`installed`, and then the device is bricked in a reboot loop - **silent at every
+layer**. No Wi-Fi, no fallback AP, and power-cycling cannot reach ESPHome's safe
+mode either. Only UART reveals why:
+
+```
+E (344) partition: No MD5 found in partition table
+E (345) partition: load_partitions returned 0x105
+assert failed: esp_ota_get_running_partition esp_ota_ops.c:721 (it != NULL)
+```
+
+ESP-IDF's `CONFIG_PARTITION_TABLE_MD5` defaults to `y`, and
+`components/esp_partition/partition.c` refuses a table with no MD5 record when it
+is set. Its own Kconfig help says the generation "should be turned off for legacy
+bootloaders which cannot recognize the MD5 checksum in the partition table" -
+which is exactly the situation here, because the stock partition table on the
+older firmware generation carries no such record.
+
+`esp_ota_get_running_partition()` then finds nothing and the app asserts **before
+Wi-Fi and before `safe_mode` set up**, which is why none of the usual recovery
+paths exist. Recovery is UART.
+
+The fix is one option:
+
+```yaml
+esp32:
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_PARTITION_TABLE_MD5: n
+```
+
+Nothing on flash changes - the stock bootloader, partition table and layout are
+all left alone; the app simply stops requiring a record that was never there.
+
+Confirm it applied before flashing, because a disabled bool is written as a
+comment rather than `=n`:
+
+```
+grep PARTITION_TABLE_MD5 .esphome/build/<name>/sdkconfig.<name>
+# CONFIG_PARTITION_TABLE_MD5 is not set
+
+strings .pioenvs/<name>/firmware.bin | grep -c "No MD5 found in partition table"
+0
+```
+
+Observed on `yeelink.light.ceiling10` (`miio_ver 0.0.6`); a `lamp9` on `0.0.9`
+does not need it, so its stock table does carry the MD5. Setting the option is
+harmless either way, so it is worth having on any config intended for this route.
+
+## What the flash looks like underneath
+
+Worth knowing before starting, because it determines what recovery is available.
+Read the table with `esptool read-flash 0x8000 0xc00 ptable.bin`. On a
+`ceiling10`:
+
+| label | type | subtype | offset | size |
+| ----- | ---- | ------- | ------ | ---- |
+| nvs | data | nvs | 0x9000 | 16K |
+| otadata | data | otadata | 0xD000 | 8K |
+| phy_init | data | phy | 0xF000 | 4K |
+| miio_fw1 | app | ota_0 | 0x10000 | 1920K |
+| miio_fw2 | app | ota_1 | 0x1F0000 | 1920K |
+| test | app | test | 0x3D0000 | 76K |
+| mfi_p | data | spiffs | 0x3E3000 | 4K |
+| factory_nvs | data | nvs | 0x3E4000 | 16K |
+| coredump | data | coredump | 0x3E8000 | 64K |
+| minvs | data | 0xfe | 0x3F8000 | 16K |
+
+Three things follow from it.
+
+**The app slots are 1920 KB**, so image size is a non-issue: stock itself is about
+1.3 MB and a typical ESPHome build for one of these is well under a megabyte.
+
+**There is no `factory` partition**, so `otadata` alone decides what boots.
+
+**Stock survives the conversion.** The updater writes to the *inactive* slot, so
+after flashing, the original vendor app is still sitting in the other one.
+
+### Getting stock back without reflashing it
+
+`otadata` holds one 32-byte record per 4K sector, at `0xD000` and `0xE000`. Each
+carries a sequence number; the highest valid one wins and selects
+`ota_[(seq-1) % 2]`. After a conversion you will typically find the older record
+still pointing at the slot stock lives in.
+
+So erase the newer record and let the older one win:
+
+```
+esptool erase-region 0xE000 0x1000
+```
+
+NVS survives, so Wi-Fi credentials and the vendor pairing stay intact and the
+device rejoins its account by itself.
+
+Do **not** erase the whole of `otadata`: with no valid record the bootloader falls
+back to the *first* app partition, which is `ota_0` - not necessarily stock.
 
 ## Procedure
 
