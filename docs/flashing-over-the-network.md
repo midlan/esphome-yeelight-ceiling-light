@@ -67,20 +67,20 @@ Not verified, and where the real risk lies:
   firmware checks beyond the CRC trailer, and how it behaves on a bad image, was
   not tested - deliberately.
 
-## Four requirements that are easy to miss
+## Five requirements that are easy to miss
 
-Not all four apply to every device, and the differences track the firmware
+Not all five apply to every device, and the differences track the firmware
 generation. Two units were converted, and this is what each one actually showed:
 
 | | `yeelink.light.lamp9`<br>`miio_ver 0.0.9`, stock 2.1.7_0031 | `yeelink.light.ceiling10`<br>`miio_ver 0.0.6`, stock 2.0.6_0049 |
 | --- | --- | --- |
 | 1. CRC trailer | appended; necessity not tested | appended; necessity not tested |
-| 2. HTTP/1.1 | **observed necessary** | not separately tested |
+| 2. HTTP/1.1 | **observed necessary** | served over 1.1 throughout, so never retested |
 | 3. no port in the URL | **not needed** - flashed successfully on port 8000 | **required** |
 | 4. `PARTITION_TABLE_MD5: n` | **not needed** - booted fine without it | **required** |
-| `FREERTOS_UNICORE: y` | used | required; die confirmed single-core |
+| 5. `FREERTOS_UNICORE: y` | set; necessity not tested | **required**; die confirmed single-core |
 
-So a newer unit may well flash with none of 3 or 4. An older one needs both, and
+So a newer unit may well flash without 3 or 4 at all. An older one needs both, and
 each failure looks like something else entirely - which is why they are written up
 in detail below rather than as a checklist.
 
@@ -125,6 +125,10 @@ Python's `http.server` answers HTTP/1.0 and ignores `Range`, so it fails here.
 Serving byte-identical content over HTTP/1.1 with keep-alive and range support
 works first time. `tools/ota_server.py` is a minimal server that does this and
 logs what the device actually requests.
+
+Every later transfer, `ceiling10` included, was served over HTTP/1.1 by that tool,
+so the failure was never reproduced on the older generation - it simply never had
+the chance to occur.
 
 ### 3. The URL must not contain a port
 
@@ -225,6 +229,34 @@ strings .pioenvs/<name>/firmware.bin | grep -c "No MD5 found in partition table"
 
 Setting the option is harmless on a device that does not need it, so it is worth
 having on any config intended for this route.
+
+### 5. Build for a single core if the die has one
+
+The `ceiling10`'s module is marked `ESP32-WROOM-32D`, which is normally the
+dual-core `D0WD`. The die in it is not:
+
+```
+Chip type: Unknown ESP32 (revision v1.0)
+Features:  Wi-Fi, BT, Single Core + LP Core, 240MHz
+```
+
+An image built for two cores tries to bring up an APP CPU that is not there, and
+faults during startup - before Wi-Fi, so it looks exactly like requirement 4.
+
+```yaml
+esp32:
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      CONFIG_FREERTOS_UNICORE: y
+```
+
+Every config in this repository already sets this, which makes it easy to overlook
+when writing a new one from scratch. It was set for the `lamp9` too, so whether
+that unit strictly needs it is unknown - its die was never read.
+
+The lesson is narrower than "check the die": the module marking does not tell you,
+so set the option rather than trusting the label.
 
 ## Always include a fallback AP
 
