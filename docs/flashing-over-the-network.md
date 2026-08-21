@@ -5,38 +5,24 @@ the device apart. On ESP32 Yeelights running stock firmware there is another
 route: the device's own `miIO.ota` update mechanism can be pointed at a file on
 your LAN.
 
-Confirmed here on `yeelink.light.lamp9` firmware `2.1.7_0031`
-(`miio_ver 0.0.9`). Third parties report the same mechanism working on
-`yeelink.light.ceiling22`; that was not verified as part of this work.
+Confirmed here on two units of different firmware generations:
+`yeelink.light.lamp9` on `2.1.7_0031` (`miio_ver 0.0.9`) and
+`yeelink.light.ceiling10` on `2.0.6_0049` (`miio_ver 0.0.6`). The requirements
+differ between them - see the table further down. Third parties report the same
+mechanism working on `yeelink.light.ceiling22`; that was not verified here.
 
 > **Read the limits first.** This writes only the application partition. The
 > stock bootloader and partition table remain, so it cannot recover a device that
-> will not boot - that still needs UART. Take a flash backup over UART first if
-> you want any way back, because no stock firmware image for these models is
-> archived anywhere public.
+> will not boot - that still needs UART.
+>
+> It is worth knowing what recovery you do have. The vendor's current stock image
+> for a given model can be fetched from Xiaomi's cloud - see
+> `docs/xiaomi-cloud-firmware.md` - so a way back exists without a UART backup,
+> though only to the *current* build, since older versions are not downloadable.
+> Separately, the updater writes to the inactive OTA slot, so the stock app
+> normally survives a conversion in the other one.
 
 ---
-
-## Why the obvious approach fails
-
-Sending `miIO.ota` **locally** over UDP 54321 with a valid token is refused:
-
-```
-{"code": -30020, "message": "service not available."}
-```
-
-The response is identical with no parameters at all and with a full payload,
-which places the refusal above the parameter layer: five payload shapes were
-tried and none made any difference. Local OTA is disabled on this firmware, and
-the update command has to arrive from the Xiaomi cloud instead.
-
-Useful error signatures when probing:
-
-| Response | Meaning |
-| -------- | ------- |
-| `-9999 user ack timeout` | method not implemented; firmware never acknowledges |
-| `-32602 Invalid param.` | method exists, parameter validation rejected the input |
-| `-30020 service not available.` | method exists, the service refuses before parsing |
 
 ## The route that works
 
@@ -60,6 +46,26 @@ Two things about that payload matter:
   from shipping a bad image.
 
 The cloud only relays the instruction. The firmware file never leaves your LAN.
+
+## What is safe and what is not
+
+Confirmed non-destructive on the reference unit:
+
+- An OTA pointed at a URL returning **404** - the device fetches, fails, returns
+  to `idle`, unharmed. A useful way to prove the path end to end without
+  installing anything.
+- Aborted transfers, including the HTTP/1.0 resets described in requirement 2.
+- Unknown or malformed miIO methods, which are ignored without a reboot.
+
+Not verified, and where the real risk lies:
+
+- The **install** stage. Once a valid image downloads it is written and booted.
+  A third-party report describes an official Yeelight OTA bricking a ceiling
+  light, so this firmware's install path can write something unbootable.
+- The OTA call itself carries no checksum, so nothing at the protocol level
+  distinguishes a correct image from one built for the wrong model. What the
+  firmware checks beyond the CRC trailer, and how it behaves on a bad image, was
+  not tested - deliberately.
 
 ## Four requirements that are easy to miss
 
@@ -220,6 +226,76 @@ strings .pioenvs/<name>/firmware.bin | grep -c "No MD5 found in partition table"
 Setting the option is harmless on a device that does not need it, so it is worth
 having on any config intended for this route.
 
+## Always include a fallback AP
+
+```yaml
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "fallback-ap"
+
+captive_portal:
+```
+
+A wrong credential is otherwise unrecoverable without UART - which defeats the
+entire point of flashing over the network. This is not hypothetical: during this
+work an SSID picked up a trailing `\r` from a CRLF file, the lamp came up on
+ESPHome unable to join, and the fallback AP turned a teardown into a two-minute
+captive-portal fix.
+
+Worth knowing how portal-saved credentials behave, because it is easy to get
+wrong. They are stored in NVS and **replace** the compiled-in ones (`set_sta`, not
+`add_sta`) - so a device can keep running on them while the firmware carries a
+wrong SSID. But the preference is keyed on `App.get_config_version_hash()`, so
+**any configuration change orphans them** and the device falls back to whatever is
+compiled in. They persist across a plain re-flash of the same config, not across
+an edited one.
+
+## Procedure
+
+1. **Recover the device token and `did`** from the Xiaomi cloud. Existing tools
+   cover this; note the Yeelight app account and the Xiaomi account may be the
+   same identity, in which case no re-pairing is needed.
+
+2. **Build the ESPHome image** for your model. Include `ap:` and
+   `captive_portal:` - see "Always include a fallback AP" above, which explains
+   why this is not optional.
+
+3. **Check it fits.** Only the application partition is written and the stock
+   partition table stays, so the image must fit the slot the stock firmware uses.
+   The stock partition table has not been dumped, so the exact slot size is
+   unknown. The `lamp9` ESPHome build used here was 810 KB and installed without
+   trouble.
+
+4. **Append the CRC trailer:**
+
+   ```
+   python3 tools/append_crc.py firmware.bin fw_crc.bin
+   ```
+
+5. **Serve it over HTTP/1.1** and confirm another host on the LAN can fetch the
+   whole file before going further:
+
+   Port **80**, not a high port. Older firmware cannot parse a URL with an
+   explicit port (requirement 3), and port 80 works on every unit tested, so it is
+   the safe default - at the cost of needing root to bind:
+
+   ```
+   sudo python3 tools/ota_server.py fw_crc.bin 80
+   ```
+
+6. **Relay the OTA command through the cloud**, with no port in the URL:
+
+   ```
+   python3 tools/cloud_ota.py --server de --ip <device-ip> \
+       --url http://<your-lan-ip>/fw_crc.bin
+   ```
+
+7. **Watch it land.** `miIO.get_ota_state` walks `idle -> downloading ->
+   installed`, the server logs one full-size `GET`, and the device reboots into
+   ESPHome. The stock protocols (TCP 55443, UDP 54321) go silent.
+
 ## What the flash looks like underneath
 
 Worth knowing before starting, because it determines what recovery is available.
@@ -268,91 +344,26 @@ device rejoins its account by itself.
 Do **not** erase the whole of `otadata`: with no valid record the bootloader falls
 back to the *first* app partition, which is `ota_0` - not necessarily stock.
 
-## Procedure
+## Appendix: why the obvious approach fails
 
-1. **Recover the device token and `did`** from the Xiaomi cloud. Existing tools
-   cover this; note the Yeelight app account and the Xiaomi account may be the
-   same identity, in which case no re-pairing is needed.
+Background, kept for the record. Nothing below is needed to follow
+the procedure above.
 
-2. **Build the ESPHome image** for your model. Include `ap:` and
-   `captive_portal:` - see the warning below.
+Sending `miIO.ota` **locally** over UDP 54321 with a valid token is refused:
 
-3. **Check it fits.** Only the application partition is written and the stock
-   partition table stays, so the image must fit the slot the stock firmware uses.
-   The stock partition table has not been dumped, so the exact slot size is
-   unknown. The `lamp9` ESPHome build used here was 810 KB and installed without
-   trouble.
-
-4. **Append the CRC trailer:**
-
-   ```
-   python3 tools/append_crc.py firmware.bin fw_crc.bin
-   ```
-
-5. **Serve it over HTTP/1.1** and confirm another host on the LAN can fetch the
-   whole file before going further:
-
-   Port **80**, not a high port. Older firmware cannot parse a URL with an
-   explicit port (requirement 3), and port 80 works on every unit tested, so it is
-   the safe default - at the cost of needing root to bind:
-
-   ```
-   sudo python3 tools/ota_server.py fw_crc.bin 80
-   ```
-
-6. **Relay the OTA command through the cloud**, with no port in the URL:
-
-   ```
-   python3 tools/cloud_ota.py --server de --ip <device-ip> \
-       --url http://<your-lan-ip>/fw_crc.bin
-   ```
-
-7. **Watch it land.** `miIO.get_ota_state` walks `idle -> downloading ->
-   installed`, the server logs one full-size `GET`, and the device reboots into
-   ESPHome. The stock protocols (TCP 55443, UDP 54321) go silent.
-
-## Always include a fallback AP
-
-```yaml
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  ap:
-    ssid: "fallback-ap"
-
-captive_portal:
+```
+{"code": -30020, "message": "service not available."}
 ```
 
-A wrong credential is otherwise unrecoverable without UART - which defeats the
-entire point of flashing over the network. This is not hypothetical: during this
-work an SSID picked up a trailing `\r` from a CRLF file, the lamp came up on
-ESPHome unable to join, and the fallback AP turned a teardown into a two-minute
-captive-portal fix.
+The response is identical with no parameters at all and with a full payload,
+which places the refusal above the parameter layer: five payload shapes were
+tried and none made any difference. Local OTA is disabled on this firmware, and
+the update command has to arrive from the Xiaomi cloud instead.
 
-Worth knowing how portal-saved credentials behave, because it is easy to get
-wrong. They are stored in NVS and **replace** the compiled-in ones (`set_sta`, not
-`add_sta`) - so a device can keep running on them while the firmware carries a
-wrong SSID. But the preference is keyed on `App.get_config_version_hash()`, so
-**any configuration change orphans them** and the device falls back to whatever is
-compiled in. They persist across a plain re-flash of the same config, not across
-an edited one.
+Useful error signatures when probing:
 
-## What is safe and what is not
-
-Confirmed non-destructive on the reference unit:
-
-- An OTA pointed at a URL returning **404** - the device fetches, fails, returns
-  to `idle`, unharmed. A useful way to prove the path end to end without
-  installing anything.
-- Aborted transfers, including the HTTP/1.0 resets above.
-- Unknown or malformed miIO methods, which are ignored without a reboot.
-
-Not verified, and where the real risk lies:
-
-- The **install** stage. Once a valid image downloads it is written and booted.
-  A third-party report describes an official Yeelight OTA bricking a ceiling
-  light, so this firmware's install path can write something unbootable.
-- The OTA call itself carries no checksum, so nothing at the protocol level
-  distinguishes a correct image from one built for the wrong model. What the
-  firmware checks beyond the CRC trailer, and how it behaves on a bad image, was
-  not tested - deliberately.
+| Response | Meaning |
+| -------- | ------- |
+| `-9999 user ack timeout` | method not implemented; firmware never acknowledges |
+| `-32602 Invalid param.` | method exists, parameter validation rejected the input |
+| `-30020 service not available.` | method exists, the service refuses before parsing |
