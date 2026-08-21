@@ -63,6 +63,22 @@ The cloud only relays the instruction. The firmware file never leaves your LAN.
 
 ## Four requirements that are easy to miss
 
+Not all four apply to every device, and the differences track the firmware
+generation. Two units were converted, and this is what each one actually showed:
+
+| | `yeelink.light.lamp9`<br>`miio_ver 0.0.9`, stock 2.1.7_0031 | `yeelink.light.ceiling10`<br>`miio_ver 0.0.6`, stock 2.0.6_0049 |
+| --- | --- | --- |
+| 1. CRC trailer | appended; necessity not tested | appended; necessity not tested |
+| 2. HTTP/1.1 | **observed necessary** | not separately tested |
+| 3. no port in the URL | **not needed** - flashed successfully on port 8000 | **required** |
+| 4. `PARTITION_TABLE_MD5: n` | **not needed** - booted fine without it | **required** |
+| `FREERTOS_UNICORE: y` | used | required; die confirmed single-core |
+
+So a newer unit may well flash with none of 3 or 4. An older one needs both, and
+each failure looks like something else entirely - which is why they are written up
+in detail below rather than as a checklist.
+
+
 ### 1. The image carries a 4-byte CRC trailer
 
 Xiaomi's own ESP32 update images are a normal ESP-IDF application image - whose
@@ -80,17 +96,19 @@ CRC-32, polynomial 0x04C11DB7 (reflected 0xEDB88320)
 ```
 
 That is standard CRC-32 without the customary pre- and post-inversion. Verified
-against two unrelated Xiaomi images - one ESP32, one MT7697 - which both
-reproduce exactly.
+against five unrelated Xiaomi images which all reproduce exactly: one MT7697, and
+the stock ESP32 images for `yeelink.light.ceiling10`, `lamp9`, `ceilb` and one
+further ESP32 product.
 
 `tools/append_crc.py` implements it, and can verify itself against any genuine
 Xiaomi image you have.
 
 ### 2. The HTTP server must speak HTTP/1.1
 
-The device's downloader identifies itself as `User-Agent: MIoT`. Against an
-HTTP/1.0 server it connects, begins reading, then resets the connection - three
-times in quick succession - and returns to `idle` with nothing written:
+Observed on `lamp9` (`miio_ver 0.0.9`). The device's downloader identifies itself
+as `User-Agent: MIoT`. Against an HTTP/1.0 server it connects, begins reading,
+then resets the connection - three times in quick succession - and returns to
+`idle` with nothing written:
 
 ```
 "GET /fw_crc.bin HTTP/1.1" 200 -
@@ -125,15 +143,20 @@ the HTTP server: a switch does not forward the device's DNS queries to another
 port, so a capture there shows nothing either way. It was only visible from the
 router.
 
-Observed on `yeelink.light.ceiling10` (`miio_ver 0.0.6`). Whether the newer
-`0.0.9` firmware parses a port correctly was not tested - the working `lamp9`
-flash happened to use port 80.
+**This is generation-specific.** Observed on `ceiling10` (`miio_ver 0.0.6`). The
+`lamp9` on `0.0.9` does **not** have the bug: it was flashed successfully with
+`--url http://<ip>:8000/fw_crc.bin`, which is why the procedure below originally
+specified port 8000.
+
+Port 80 is nevertheless the right default, because it works on both and costs
+only a `sudo`.
 
 #### Corollary: what counts as success
 
 `["ok"]` is the cloud acknowledging the relay, not the device agreeing to do
-anything, and on some firmware `miIO.ota` reboots the device about eight seconds
-later whether or not it downloads. **Watch the HTTP server log for a GET from the
+anything. On `ceiling10` (`0.0.6`), `miIO.ota` also reboots the device about eight
+seconds after it is accepted whether or not a download follows, so a failed
+attempt power-cycles the light. **Watch the HTTP server log for a GET from the
 device**; that is the only evidence the transfer started, and
 `miIO.get_ota_state` moving `idle -> downloading -> installed` confirms it.
 
@@ -143,6 +166,10 @@ generation wants a different payload - though note that no payload shape helps i
 the URL carries a port.
 
 ### 4. The app must tolerate a partition table with no MD5
+
+**Also generation-specific**, and observed on `ceiling10` (`miio_ver 0.0.6`); the
+`lamp9` on `0.0.9` booted an image built without this option, so its stock table
+does carry the MD5 record.
 
 This one does not stop the transfer. The image downloads, the updater reports
 `installed`, and then the device is bricked in a reboot loop - **silent at every
@@ -190,15 +217,14 @@ strings .pioenvs/<name>/firmware.bin | grep -c "No MD5 found in partition table"
 0
 ```
 
-Observed on `yeelink.light.ceiling10` (`miio_ver 0.0.6`); a `lamp9` on `0.0.9`
-does not need it, so its stock table does carry the MD5. Setting the option is
-harmless either way, so it is worth having on any config intended for this route.
+Setting the option is harmless on a device that does not need it, so it is worth
+having on any config intended for this route.
 
 ## What the flash looks like underneath
 
 Worth knowing before starting, because it determines what recovery is available.
-Read the table with `esptool read-flash 0x8000 0xc00 ptable.bin`. On a
-`ceiling10`:
+Read the table with `esptool read-flash 0x8000 0xc00 ptable.bin`. Layout below is
+from a `ceiling10`; other models are likely similar but were not dumped.
 
 | label | type | subtype | offset | size |
 | ----- | ---- | ------- | ------ | ---- |
@@ -266,8 +292,9 @@ back to the *first* app partition, which is `ota_0` - not necessarily stock.
 5. **Serve it over HTTP/1.1** and confirm another host on the LAN can fetch the
    whole file before going further:
 
-   Port **80**, not a high port - the updater cannot parse a URL with an
-   explicit port (see requirement 3), so binding 80 needs root:
+   Port **80**, not a high port. Older firmware cannot parse a URL with an
+   explicit port (requirement 3), and port 80 works on every unit tested, so it is
+   the safe default - at the cost of needing root to bind:
 
    ```
    sudo python3 tools/ota_server.py fw_crc.bin 80
