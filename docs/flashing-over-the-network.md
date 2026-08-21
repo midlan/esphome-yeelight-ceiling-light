@@ -74,7 +74,7 @@ generation. Two units were converted, and this is what each one actually showed:
 
 | | `yeelink.light.lamp9`<br>`miio_ver 0.0.9`, stock 2.1.7_0031 | `yeelink.light.ceiling10`<br>`miio_ver 0.0.6`, stock 2.0.6_0049 |
 | --- | --- | --- |
-| 1. CRC trailer | appended; necessity not tested | appended; necessity not tested |
+| 1. CRC trailer | appended; necessity not tested | **required** - verified by serving an image without one |
 | 2. HTTP/1.1 | **observed necessary** | served over 1.1 throughout, so never retested |
 | 3. no port in the URL | **not needed** - flashed successfully on port 8000 | **required** |
 | 4. `PARTITION_TABLE_MD5: n` | **not needed** - booted fine without it | **required** |
@@ -89,8 +89,35 @@ in detail below rather than as a checklist.
 
 Xiaomi's own ESP32 update images are a normal ESP-IDF application image - whose
 internal SHA-256 verifies - followed by four extra bytes. A plain ESPHome
-`firmware.bin` has no trailer, so one was appended here to match the vendor
-format. Whether the device rejects an image without it was not tested.
+`firmware.bin` has no trailer, so one must be appended.
+
+**This is enforced.** Serving a `ceiling10` an image with no trailer - byte-identical
+to one it had already accepted and booted, minus the four bytes - it downloads the
+whole file, rejects it, and retries twice more before giving up:
+
+```
+[I] miio_ota: 1 ota task comming...
+[I] httpc: Content-Length 804704
+[I] httpc: ==> 0% ... ==> 100%
+[I] httpc: GET Done(804704bytes).
+[I] httpc: File Done(804704bytes).
+[E] arch_ota: crc check failed!  (arch_ota_check_crc,309)
+[E] ota_app: ota erro count:1 (app_fw_error,366)
+[W] miio_ota: error count = 1 (ota_virtual_error,398)
+        ... two more identical attempts ...
+[E] miio_ota: error occurred too many times (ota_virtual_error,406)
+[I] miio_ota: installed = 0, failed = 1
+```
+
+Three complete downloads and no install. Note the shape of that failure, because
+it is visible without a serial console: **three full-size GETs in the HTTP server
+log, then `miIO.get_ota_state` returning to `idle`** with the device still on stock.
+A trailered image produces exactly one GET and then `installed`.
+
+The device is left untouched by a rejection, so this is a safe thing to get wrong.
+
+The vendor's own function name, `arch_ota_check_crc`, also confirms the trailer is
+a CRC over the image rather than any other kind of tag.
 
 The algorithm is **not** a standard CRC-32; none of the catalogued variants
 reproduce it:
@@ -113,8 +140,8 @@ Xiaomi image you have.
 
 Observed on `lamp9` (`miio_ver 0.0.9`). The device's downloader identifies itself
 as `User-Agent: MIoT`. Against an HTTP/1.0 server it connects, begins reading,
-then resets the connection - three times in quick succession - and returns to
-`idle` with nothing written:
+then resets the connection - three times, the updater's own retry limit, the same
+one seen in requirement 1 - and returns to `idle` with nothing written:
 
 ```
 "GET /fw_crc.bin HTTP/1.1" 200 -
