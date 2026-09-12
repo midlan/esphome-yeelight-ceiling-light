@@ -11,9 +11,12 @@ Confirmed here on two units of different firmware generations:
 differ between them - see the table further down. Third parties report the same
 mechanism working on `yeelink.light.ceiling22`; that was not verified here.
 
-> **Read the limits first.** This writes only the application partition. The
-> stock bootloader and partition table remain, so it cannot recover a device that
-> will not boot - that still needs UART.
+> **Read the limits first.** The procedure here writes only the application
+> partition. The stock bootloader and partition table remain, so it cannot recover
+> a device that will not boot - that still needs UART, since a device that does not
+> boot is not on the network either. (ESPHome does document writing the partition
+> table and bootloader over the air; that was not tested here - see "Replacing the
+> partition table or bootloader" below.)
 >
 > It is worth knowing what recovery you do have. The vendor's current stock image
 > for a given model can be fetched from Xiaomi's cloud - see
@@ -22,6 +25,13 @@ mechanism working on `yeelink.light.ceiling22`; that was not verified here.
 > Separately, the updater writes to the inactive OTA slot, so the stock app
 > survives in the other one - but only until the *next* flash, which targets it.
 > See "What the flash looks like underneath" below.
+>
+> That surviving copy can be read out **over the network**, and written back the
+> same way, with no UART and no teardown - which also covers the case the cloud
+> cannot: a build older than current, or a model the endpoint does not serve. It
+> has to be set up before the conversion, though, because the image that replaces
+> stock is the only one that can still reach it. See "Reading the stock image out
+> over the network" below, and enable `flash_probe.yaml` at step 2.
 
 ---
 
@@ -136,6 +146,14 @@ further ESP32 product.
 
 `tools/append_crc.py` implements it, and can verify itself against any genuine
 Xiaomi image you have.
+
+**The trailer is stored in flash, not consumed by the updater.** Reading a
+converted `lamp9`'s stock slot back shows the image ending at its ESP-IDF length
+of 1,494,080 bytes with `0414c948` in the four bytes immediately after - the same
+trailer the served file carried. Two things follow. Restoring such an image
+byte-for-byte reproduces what the vendor wrote, trailer included; and
+`esp_image_verify()` accepts it, because bytes past the declared image end are
+never examined. Both were confirmed by restoring one.
 
 ### 2. The HTTP server must speak HTTP/1.1
 
@@ -322,11 +340,16 @@ an edited one.
    `captive_portal:` - see "Always include a fallback AP" above, which explains
    why this is not optional.
 
+   If you want a copy of the vendor firmware, uncomment the `flash_probe.yaml`
+   include at the top of the device config **now**. This is the only flash after
+   which stock is still readable: the next one overwrites it, so an image without
+   this cannot be used to rescue the copy it is sitting next to.
+
 3. **Check it fits.** Only the application partition is written and the stock
    partition table stays, so the image must fit the slot the stock firmware uses.
-   The stock partition table has not been dumped, so the exact slot size is
-   unknown. The `lamp9` ESPHome build used here was 810 KB and installed without
-   trouble.
+   The slots are **1,966,080 bytes** (0x1E0000) on both models dumped here, and
+   stock itself is about 1.4 MB, so a typical ESPHome build has well over a
+   megabyte of headroom. The `lamp9` builds used here were 810 KB and 828 KB.
 
 4. **Append the CRC trailer:**
 
@@ -359,8 +382,14 @@ an edited one.
 ## What the flash looks like underneath
 
 Worth knowing before starting, because it determines what recovery is available.
-Read the table with `esptool read-flash 0x8000 0xc00 ptable.bin`. Layout below is
-from a `ceiling10`; other models are likely similar but were not dumped.
+Read the table with `esptool read-flash 0x8000 0xc00 ptable.bin` over UART, or
+without opening the device by enabling `flash_probe.yaml`, whose `debug`
+component logs the whole table at boot.
+
+Dumped on two units of different firmware generations - `ceiling10` on `2.0.6`
+over UART, `lamp9` on `2.1.7` over the network - and the two are **identical**,
+label for label and byte for byte. That is worth knowing before assuming a new
+model differs, though it is still two data points.
 
 | label | type | subtype | offset | size |
 | ----- | ---- | ------- | ------ | ---- |
@@ -387,7 +416,8 @@ and ESPHome's own OTA write to whatever `esp_ota_get_next_update_partition()`
 returns, which with two slots and no `factory` partition strictly alternates. So
 the conversion lands in the free slot and leaves the vendor app intact; the *next*
 flash targets the slot holding it. If you want that copy, read it out before the
-second flash - see `docs/flashing-over-uart.md`.
+second flash - over the network as described below, or over UART per
+`docs/flashing-over-uart.md`.
 
 **Configuration is not in the app slots at all**, which is what makes going back
 and forth survivable. Details below.
@@ -448,6 +478,156 @@ device rejoins its account by itself.
 
 Do **not** erase the whole of `otadata`: with no valid record the bootloader falls
 back to the *first* app partition, which is `ota_0` - not necessarily stock.
+
+The records were read off a converted `lamp9` and behave exactly as described:
+`seq` 4 and 3, the higher one flagged `ota_state = 0x02` (valid) and the other
+`0xFFFFFFFF` (undefined), selecting `ota_[(4-1) % 2]` = `ota_1` = `miio_fw2` -
+which was the slot the device reported running.
+
+### Reading the stock image out over the network
+
+The `otadata` trick above only works while the vendor copy is still in a slot. It
+does not survive a second flash, and it cannot help at all on a device whose stock
+build the cloud no longer serves. Reading the image out gives you a file instead,
+and needs no UART.
+
+**Set it up before converting.** Uncomment the include at the top of the device
+config:
+
+```yaml
+packages:
+  flash_probe: !include flash_probe.yaml
+```
+
+That adds four read-only API actions - `dump_flash`, `dump_otadata`, `log_slots`,
+`redump_config` - implemented in `tools/probe_flash.h`. It does **not** enable
+`allow_partition_access`, which gates partition-table and bootloader *writes* and
+carries its own bricking warning; none of this needs it.
+
+`dump_flash` reads `esp_ota_get_next_update_partition()` - the slot this build is
+not running from, which after exactly one flash is the one holding stock - and
+logs it as base64, one chunk per line. `tools/dump_stock.py` drives that loop,
+reassembles the chunks and is restartable, because it records completed offsets
+in a sidecar next to the output file:
+
+```
+python3 tools/dump_stock.py <device-ip> stock.bin
+```
+
+The whole slot comes out, 960 chunks of 2048 bytes on these models. On the run
+documented here that took about six minutes with no retries.
+
+**Verify it against something.** The point of the exercise is a file you can
+trust, so check it against an independent oracle rather than eyeballing it. If the
+cloud still serves your model's build, `docs/stock-firmware-catalogue.md` has the
+md5 - and a match proves the technique rather than merely producing plausible
+bytes. The `lamp9` `2.1.7_0031` extraction reproduced the catalogue md5
+`08f09790930817d39d02cb2d5dac1840` exactly, trailer included.
+
+**Do not truncate trailing `0xFF` to find the end of the image.** A slot is not
+image-then-erase-pattern. The updater erases only the sectors it writes, so
+whatever the *previous* firmware left beyond the current image is still there. The
+`lamp9` slot read back as:
+
+| region | contents |
+| ------ | -------- |
+| 0x000000 - 0x16CC43 | the image, plus its 4-byte CRC trailer |
+| 0x16CC44 - 0x16CFFF | `0xFF`, padding to the sector boundary |
+| 0x16D000 - 0x18FD8F | 142,736 bytes left over from an earlier, larger build |
+| 0x18FD90 - end | `0xFF` |
+
+Trimming trailing `0xFF` would have yielded 1,637,776 bytes - not the image, and
+not anything that would boot. Parse the ESP-IDF header instead:
+
+```
+python3 tools/parse_esp32_img.py stock.bin
+```
+
+which reports the segment structure, checks the appended SHA-256, and prints where
+the legitimate image ends and how many bytes follow it.
+
+Those leftover sectors are also worth a thought before sharing a raw slot dump:
+they contain fragments of whatever occupied the partition previously.
+
+### Putting a stock image back over the network
+
+ESPHome's own OTA accepts a foreign image, so a stock build can be written back
+the same way it came out - no UART, and no need for the device to still be paired
+to the cloud:
+
+```
+esphome upload --file stock.bin <device-config>.yaml --device <device-ip>
+```
+
+Underneath, this is an ordinary `OTA_TYPE_UPDATE_APP` write - unrestricted, and
+nothing to do with `allow_partition_access`. It targets
+`esp_ota_get_next_update_partition()`, so it lands in the slot the running build
+is not using; then `esp_ota_end()` runs `esp_image_verify()` and, if that passes,
+`esp_ota_set_boot_partition()` flips `otadata`. Both images survive - you end up
+with stock in one slot and ESPHome in the other, booting stock.
+
+Keep the CRC trailer on. It is what the vendor writes, and `esp_image_verify()`
+ignores bytes past the declared image end.
+
+Confirmed end to end on a `lamp9`: 1,494,084 bytes uploaded in 9.6 s, the device
+rebooted onto stock `2.1.7_0031`, TCP 55443 answered again, and - because NVS is
+untouched - the vendor app drove the lamp immediately without re-pairing. The
+image used was the one extracted from that same lamp, so what this demonstrates is
+the full round trip rather than a checksum.
+
+**How to test a restore honestly.** Writing stock into a slot that already holds
+byte-identical stock proves nothing: a write that did nothing at all would leave a
+valid stock image in place, `otadata` would still flip, and the device would still
+boot stock. Success and no-op are indistinguishable. Overwrite the target slot
+with something else first - flashing the ESPHome build a second time will do it,
+since that targets the inactive slot - and confirm the slot really changed by
+reading its first chunk back with `dump_flash`. Only then push the stock image.
+Booting stock afterwards has exactly one explanation.
+
+**The risk, stated plainly.** The good failure is `esp_image_verify()` rejecting
+the image: the OTA aborts and nothing changes. The bad failure is a written but
+unbootable image. These devices log `Bootloader too old for OTA rollback` at boot,
+so there is no automatic recovery from that - it means UART. Bounded, but real.
+
+### Replacing the partition table or bootloader
+
+**Not tested in this project.** What follows is what ESPHome documents as
+supported, recorded so the limits above are not mistaken for a hard boundary.
+Nothing in the procedures on this page exercises it, and upstream's own warning is
+that getting it wrong bricks the device past network recovery - which on these
+lamps means UART, and opening them.
+
+Everything else on this page writes only the application partition, using
+`OTA_TYPE_UPDATE_APP` (0x00), which needs no special permission. ESPHome also
+defines `OTA_TYPE_UPDATE_PARTITION_TABLE` (0x01) and `OTA_TYPE_UPDATE_BOOTLOADER`
+(0x02), gated behind an opt-in:
+
+```yaml
+ota:
+  - platform: esphome
+    allow_partition_access: true    # ESP32 only, default false
+```
+
+With that in the **running** build:
+
+```
+esphome upload --partition-table <device-config>.yaml --device <device-ip>
+esphome upload --bootloader      <device-config>.yaml --device <device-ip>
+```
+
+Four constraints worth knowing before planning around it:
+
+- The flag must already be on the device. Enabling it costs one ordinary app
+  flash first - and on a converted lamp that flash is the one that overwrites the
+  surviving stock slot, so sequence it deliberately.
+- The CLI refuses the options without the flag, and the device rejects the
+  handshake independently with "Device only supports app updates".
+- `--partition-table` and `--bootloader` cannot be combined, and neither works
+  over serial - they are OTA-only paths.
+- A newer bootloader is what would clear the `Bootloader too old for OTA rollback`
+  warning these devices log, and restore rollback protection. That is the obvious
+  motivation; it is also the change with the least margin for error, since a bad
+  bootloader leaves nothing to recover with.
 
 ## Appendix: why the obvious approach fails
 
