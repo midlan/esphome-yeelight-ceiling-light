@@ -167,7 +167,27 @@ bootloader and partition table stay in place. ESPHome reports:
 ```
 
 Harmless in practice, but it costs around 40KB of IRAM and there is no OTA
-rollback protection. Only a UART flash replaces the bootloader.
+rollback protection.
+
+Replacing the bootloader would clear both, and ESPHome documents a way to do it
+over the air - but **it was not tested here**, so treat the following as what
+upstream supports rather than as something this project has done. Upstream's own
+warning is that getting it wrong bricks the device beyond network recovery, and
+on these lamps that means UART, which means opening them.
+
+The mechanism: `allow_partition_access: true` on the `esphome` OTA platform
+(ESP32 only, off by default) makes the device accept
+`OTA_TYPE_UPDATE_PARTITION_TABLE` and `OTA_TYPE_UPDATE_BOOTLOADER` alongside the
+ordinary `OTA_TYPE_UPDATE_APP`, which `esphome upload --partition-table` and
+`--bootloader` then send. Note the ordering trap: the flag has to be in the
+*running* build, so enabling it costs one ordinary flash first - the CLI refuses
+otherwise, and the device rejects the handshake with "Device only supports app
+updates". The two options are mutually exclusive and OTA-only; they are refused
+for serial uploads.
+
+What is verified on this device is the unrestricted half: `OTA_TYPE_UPDATE_APP`
+needs no such flag, and was used to write a stock image back over the network -
+see [flashing-over-the-network.md](flashing-over-the-network.md).
 
 ## Transition length
 
