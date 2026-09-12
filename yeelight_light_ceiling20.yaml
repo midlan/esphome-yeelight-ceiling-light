@@ -1,3 +1,16 @@
+# Keeping a copy of the stock firmware: uncomment BEFORE the first flash.
+#
+# A flash always targets the OTA slot that is not running, so this conversion
+# leaves the vendor image intact in the other slot - but only until the next
+# flash, which targets exactly that slot. This image is therefore the only one
+# that can still read it. Convert without this and the copy is gone: gaining the
+# ability to read it costs the flash that destroys it.
+#
+# Read-only; see flash_probe.yaml and docs/flashing-over-the-network.md.
+#
+# packages:
+#   flash_probe: !include flash_probe.yaml
+
 substitutions:
   name: yeelight-light-ceiling20
 
