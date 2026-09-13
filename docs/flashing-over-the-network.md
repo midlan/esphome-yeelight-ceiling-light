@@ -332,9 +332,55 @@ an edited one.
 
 ## Procedure
 
-1. **Recover the device token and `did`** from the Xiaomi cloud. Existing tools
-   cover this; note the Yeelight app account and the Xiaomi account may be the
-   same identity, in which case no re-pairing is needed.
+1. **Set up cloud access.** There is nothing to look up by hand: `tools/cloud_ota.py`
+   finds the device's `did` itself, by matching the `--ip` you give it against the
+   device list on your account. The device's LAN token is not needed either - the
+   command is relayed by the cloud, not sent locally, so the token only matters for
+   the local call that does not work anyway (see the appendix).
+
+   Logging in is delegated to
+   [Xiaomi-cloud-tokens-extractor](https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor),
+   which handles the captcha and email 2FA that Xiaomi's login now requires. It is
+   not vendored here, so clone it where the tools expect it, or point `--extractor`
+   at a checkout elsewhere:
+
+   ```
+   git clone https://github.com/PiotrMachowski/Xiaomi-cloud-tokens-extractor \
+       tools/Xiaomi-cloud-tokens-extractor
+   ```
+
+   Credentials are read from the environment rather than passed as arguments.
+   Prompt for the password instead of typing it into the command line, so it stays
+   out of your shell history:
+
+   ```
+   export MI_USERNAME=you@example.com
+   read -rsp 'Mi password: ' MI_PASSWORD && export MI_PASSWORD
+   ```
+
+   `--qr` logs in by scanning a code in the Mi Home app instead, which needs no
+   password at all and skips both the captcha and the emailed code - worth reaching
+   for, since Xiaomi rate limits those codes. Sessions are cached by
+   `tools/mi_session.py` and reused until the server rejects them, so this is
+   usually a one-time cost. See "Logging in" in
+   [xiaomi-cloud-firmware.md](xiaomi-cloud-firmware.md) for the details, including
+   where the cache lives.
+
+   `--server` selects the account region (`cn`, `de`, `us`, `ru`, `tw`, `sg`, `i2`;
+   default `de`). The device list is per-region, so the wrong one simply will not
+   find your lamp.
+
+   Note the Yeelight app account and the Xiaomi account may be the same identity,
+   in which case no re-pairing is needed.
+
+   Confirm the whole path before flashing anything. This only reads:
+
+   ```
+   python3 tools/cloud_ota.py --server de --ip <device-ip> --state
+   ```
+
+   It prints the matched device - name, model and `did` - and its OTA state, which
+   is `idle` on a lamp that has not been touched.
 
 2. **Build the ESPHome image** for your model. Include `ap:` and
    `captive_portal:` - see "Always include a fallback AP" above, which explains
